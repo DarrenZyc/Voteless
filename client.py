@@ -8,11 +8,13 @@ from tkinter import scrolledtext
 import hashlib
 import datetime
 import json
-
+import time
+import random
 import sys
 
 GUI_RUNNING = False
 LOG = None
+DECISIONS = None
 KEY_TYPE = "type"
 KEY_PAYLOAD = "payload"
 KEY_HASH = "hash"
@@ -28,13 +30,14 @@ RES_DRAW = "D"
 
 
 def myprint(message):
-    if GUI_RUNNING:
-        LOG.insert(INSERT, message)
+    if GUI_RUNNING and LOG != None:
+        LOG.insert(INSERT, "\n" + message)
     print(message)
 
 
 class Client:
-    def __init__(self, id, addr, port, addr_book, always=""):
+    def __init__(self, id, addr, port, addr_book, mode):
+        self.mode = mode
         self.id = id
         self.addr = addr
         self.port = port
@@ -45,6 +48,7 @@ class Client:
         self.my_final_decision = None
         self.final_decisions = []
         self.initial_sender = None
+        self.gui_response = None
         myprint(
             f"[Info] Client initialized with id {self.id} at {self.addr}:{self.port}"
         )
@@ -58,10 +62,10 @@ class Client:
         self.threads.append(t2)
         t2.start()
 
-        # t3 = threading.Thread(target=self.gui)
-        # t3.daemon = True
-        # self.threads.append(t3)
-        # t3.start()
+        t3 = threading.Thread(target=self.gui)
+        t3.daemon = True
+        self.threads.append(t3)
+        t3.start()
 
     def console(self):
         while True:
@@ -85,31 +89,53 @@ class Client:
                 print(f"Unknown command: {command}")
 
     def gui(self):
-        global GUI_RUNNING
+        global GUI_RUNNING, LOG, DECISIONS
         window = Tk()
         window.title(f"id: {self.id} at {self.addr}:{self.port}")
-        window.geometry("400x300")
+        window.geometry("450x350")
 
-        vote = Entry(window, width=50)
-        vote.grid(row=0, column=0)
-        btn = Button(window, text="Vote")
+        self.voteEntry = Entry(window, width=50)
+        self.voteEntry.grid(row=0, column=0)
+        btn = Button(window, text="Vote", command=self.gui_vote)
         btn.grid(row=0, column=1)
+        self.label0 = Label(window, text="<Content>", width=30)
+        self.label0.grid(row=1, column=0)
+        btnY = Button(window, text="Y", command=self.gui_Y)
+        btnY.grid(row=2, column=0)
+        btnN = Button(window, text="N", command=self.gui_N)
+        btnN.grid(row=2, column=1)
+
+        label1 = Label(window, text="Log:")
+        label1.grid(row=3, column=0)
         LOG = scrolledtext.ScrolledText(window, width=45, height=5)
-        LOG.grid(row=1, column=0, columnspan=2, pady=5)
+        LOG.grid(row=4, column=0, columnspan=3, pady=5, padx=5)
+        label2 = Label(window, text="Results:")
+        label2.grid(row=5, column=0)
+        DECISIONS = scrolledtext.ScrolledText(window, width=45, height=6)
+        DECISIONS.grid(row=6, column=0, columnspan=3, pady=5, padx=5)
 
         GUI_RUNNING = True
         window.mainloop()
+
+    def gui_vote(self):
+        self.gui_response = None
+        self.vote(self.voteEntry.get())
+
+    def gui_Y(self):
+        self.gui_response = "y"
+
+    def gui_N(self):
+        self.gui_response = "N"
 
     def vote(self, message):
         content = {}
         content[KEY_TYPE] = TYPE_VOTE
         content[KEY_PAYLOAD] = message
-        current_hash = self.time_hash()
-        content[KEY_HASH] = current_hash
+        content[KEY_HASH] = self.time_hash()
         content[KEY_ADDRESS] = self.addr
         content[KEY_PORT] = self.port
-       
-        # print("VOTE SEND CONTENT: " + json.dumps(content))
+        self.initial_sender = None
+        myprint(f"[Info] Vote: " + message)
         self.sendToPeers(json.dumps(content))
 
     def sendToPeers(self, message):
@@ -118,13 +144,20 @@ class Client:
                 try:
                     ss = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     ss.connect((peer.split()[1], int(peer.split()[2])))
-                    print(f"--connected to {peer.split()[1]} : {int(peer.split()[2])}")
+                    # print(f"--connected to {peer.split()[1]} : {int(peer.split()[2])}")
                     ss.send(message.encode())
                     ss.close()
                 except ConnectionRefusedError:
-                    print(
-                        f"--Peer not available {peer.split()[1]} : {int(peer.split()[2])}"
-                    )
+                    myprint(f"[Info] Abort with peer {int(peer.split()[2])}")
+
+    def gui_wait_for_response(self):
+        if self.mode:
+            dec = random.choice(["y", "N"])
+            print("DECISON: ", dec)
+            return dec
+        while self.gui_response is None:
+            time.sleep(0.5)
+        return self.gui_response
 
     def tcp_listener(self):
         ss = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -139,10 +172,14 @@ class Client:
     def helper_check_for_generate_result(self, hash):
         # generate result
         # TODO: check each peer before sending
+        global DECISIONS
         content = {}
         content[KEY_TYPE] = TYPE_FINALIZED
         my_decision = self.generate_result()
-        print(f"- my decision is {my_decision}, send back to org voter")
+        # self.vote_decisions.append(my_decision)
+        self.final_decisions.append(my_decision)
+        DECISIONS.insert(INSERT, "\n" + json.dumps({"hash": hash[0:5], "decision": my_decision}))
+        # print(f"-- my decision is {my_decision}, send back to org voter")
         content[KEY_PAYLOAD] = my_decision
         content[KEY_HASH] = hash
 
@@ -151,36 +188,47 @@ class Client:
             ss.connect((self.initial_sender[0], self.initial_sender[1]))
             ss.send(json.dumps(content).encode())
             message = ss.recv(1024).decode()
+            # print("[DEBUG] " + message)
             message = json.loads(message)
 
             if message[KEY_TYPE] == TYPE_AWARDS:
-                print("---- awrd")
+                myprint(f"[Info] Completed")
                 self.balance += int(message[KEY_PAYLOAD])
             ss.close()
+        except json.JSONDecodeError:
+            print(f"[DECODE] {message}")
         except ConnectionRefusedError:
             print(
-                f"original sender not available {(self.initial_sender[0], self.initial_sender[1])}"
+                f"-- original sender not available {(self.initial_sender[0], self.initial_sender[1])}"
             )
 
     def tcp_handler(self, ssocket, sender_addr):
+        global GUI_RUNNING
         message = ssocket.recv(1024)
         if not message:
             return
         message = message.decode()
         message = json.loads(message)
         if message[KEY_TYPE] == TYPE_VOTE:
-            print("---- vote")
+            # print("-- vote")
             self.initial_sender = (message[KEY_ADDRESS], int(message[KEY_PORT]))
             # make my decision here
-            response = input(
-                f'For question "{message[KEY_PAYLOAD]}" my answer is: (y/N) > '
-            )
+            if self.label0 != None and GUI_RUNNING:
+                self.label0.config(text=message[KEY_PAYLOAD])
+                response = self.gui_wait_for_response()
+            else:
+                response = input(
+                    f'For question "{message[KEY_PAYLOAD]}" my answer is: (y/N) > '
+                )
             content = {}
             content[KEY_TYPE] = TYPE_RESPONSE
             my_decision = VOTE_YES if response == VOTE_YES else VOTE_NO
             content[KEY_PAYLOAD] = my_decision
             # keep track of decisions
             self.vote_decisions.append(my_decision)
+            #     {"hash": message[KEY_HASH], "decision": my_decision}
+            # )
+            # DECISIONS.insert(INSERT, "\n" + json.dumps({"hash": message[KEY_HASH][0:5], "decision": my_decision}))
             content[KEY_HASH] = message[KEY_HASH]
             # boardcast to others
             # print("VOTE RESPD CONTENT: " + json.dumps(content))
@@ -193,26 +241,20 @@ class Client:
                 self.helper_check_for_generate_result(message[KEY_HASH])
 
         elif message[KEY_TYPE] == TYPE_RESPONSE:
-            print("---- resp")
-            
+            # print("-- resp")
             # print(f"I reced resp: {message}")
             self.vote_decisions.append(message[KEY_PAYLOAD])
-
 
             if len(self.vote_decisions) == len(self.peers) - 1:
                 if self.initial_sender == None:
                     self.my_final_decision = self.generate_result()
                     print(f"+ Final decision is {self.my_final_decision}")
+                    self.final_decisions.append(self.my_final_decision)
+                    DECISIONS.insert(INSERT, "\n" + json.dumps({"hash": message[KEY_HASH][0:5], "decision": self.my_final_decision}))
                 else:
                     self.helper_check_for_generate_result(message[KEY_HASH])
 
         elif message[KEY_TYPE] == TYPE_FINALIZED:
-            print("---- fnlzd")
-            if len(self.vote_decisions) != 0:
-                print("--interesting - size not zero")
-                for dec in self.vote_decisions:
-                    print(f"\t\t{dec}")
-
             if self.my_final_decision == message[KEY_PAYLOAD]:
                 # TODO: check each peer before sending
                 content = {}
@@ -222,8 +264,9 @@ class Client:
                 content[KEY_PAYLOAD] = payload
                 content[KEY_HASH] = self.hash(message[KEY_HASH], payload)
                 # self.sendToPeers(json.dumps(content))
-                print("SEND REWD ", payload)
+                # print("-- SEND REWD ", payload)
                 ssocket.send((json.dumps(content)).encode())
+                myprint(f"[Info] Completed with this peer")
 
         ssocket.close()
 
@@ -238,7 +281,6 @@ class Client:
             res = VOTE_YES if count_yes > count_no else VOTE_NO
         # print(f"I've got result! the result is {res}")
         return res
-
 
     # Generate a hash of current time stamp
     def time_hash(self, payload=""):
@@ -291,7 +333,7 @@ def main():
                 my_port = line.split()[2]
 
     if my_port != "" and my_addr != -1:
-        Client(args.id, my_addr, my_port, addr_book)
+        Client(args.id, my_addr, my_port, addr_book, args.auto)
 
 
 if __name__ == "__main__":
